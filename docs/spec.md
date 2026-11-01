@@ -36,17 +36,17 @@ Name: `kurumi` (a walnut that a squirrel buries for later). License: MIT (tentat
 
 ### Header (22 bytes, then `enc`)
 
-| Offset | Length | Field | v1 value |
-| --- | --- | --- | --- |
-| 0 | 8 | magic | ASCII `KURUMI` + `0x00 0x00` |
-| 8 | 1 | version | `0x01` |
-| 9 | 2 | kem_id | `0x0020` = DHKEM(X25519, HKDF-SHA256) |
-| 11 | 2 | kdf_id | `0x0001` = HKDF-SHA256 |
-| 13 | 2 | aead_id | `0x0002` = AES-256-GCM |
-| 15 | 1 | compression | `0x00` = none, `0x01` = gzip |
-| 16 | 4 | chunk_size | plaintext bytes per record (uint32). Allowed: 65,536 to 16,777,216. Default 1,048,576 |
-| 20 | 2 | enc_len | must be 32 |
-| 22 | 32 | enc | HPKE encapsulated key |
+| Offset | Length | Field       | v1 value                                                                              |
+| ------ | ------ | ----------- | ------------------------------------------------------------------------------------- |
+| 0      | 8      | magic       | ASCII `KURUMI` + `0x00 0x00`                                                          |
+| 8      | 1      | version     | `0x01`                                                                                |
+| 9      | 2      | kem_id      | `0x0020` = DHKEM(X25519, HKDF-SHA256)                                                 |
+| 11     | 2      | kdf_id      | `0x0001` = HKDF-SHA256                                                                |
+| 13     | 2      | aead_id     | `0x0002` = AES-256-GCM                                                                |
+| 15     | 1      | compression | `0x00` = none, `0x01` = gzip                                                          |
+| 16     | 4      | chunk_size  | plaintext bytes per record (uint32). Allowed: 65,536 to 16,777,216. Default 1,048,576 |
+| 20     | 2      | enc_len     | must be 32                                                                            |
+| 22     | 32     | enc         | HPKE encapsulated key                                                                 |
 
 All integers are big-endian.
 
@@ -57,11 +57,11 @@ All integers are big-endian.
 
 Each record is:
 
-| Length | Field |
-| --- | --- |
-| 1 | flag: `0x00` = more records follow, `0x01` = final record |
-| 4 | plen: plaintext length of this record (uint32) |
-| plen + 16 | `Sender.Seal(aad = flag ‖ plen, plaintext)` |
+| Length    | Field                                                     |
+| --------- | --------------------------------------------------------- |
+| 1         | flag: `0x00` = more records follow, `0x01` = final record |
+| 4         | plen: plaintext length of this record (uint32)            |
+| plen + 16 | `Sender.Seal(aad = flag ‖ plen, plaintext)`               |
 
 - One HPKE context per file. Records are sealed and opened strictly in order; HPKE's sequence number provides the nonce, so reordering, dropping, or duplicating records fails
 - A non-final record has `plen == chunk_size` exactly. The final record has `0 ≤ plen ≤ chunk_size`
@@ -107,18 +107,18 @@ Backup targets are declared in a configuration file, so the server that pushes a
 }
 ```
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `version` | yes | `1` |
-| `targets` | yes | Map from target name (`[a-z0-9-]{1,63}`) to target |
-| `bucket` | one of `bucket` / `output_dir` | Cloud Storage bucket |
-| `prefix` | no | Object name prefix (default: the target name). 1–200 characters of `[A-Za-z0-9._/-]`, no leading or trailing `/`, no `//`, no `.` or `..` segment. Objects are `<prefix>/<name>` |
-| `output_dir` | one of `bucket` / `output_dir` | Local directory for the encrypted files instead of a bucket |
-| `paths` | yes | Directories to archive (absolute) |
-| `exclude` | no | Glob patterns (see archiving rules) |
-| `recipient` / `recipient_file` | exactly one | Public key, inline or as a file |
-| `compress` | no | Default `true` |
-| `chunk_size` | no | Default 1,048,576 (section 3 range) |
+| Key                            | Required                       | Meaning                                                                                                                                                                          |
+| ------------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`                      | yes                            | `1`                                                                                                                                                                              |
+| `targets`                      | yes                            | Map from target name (`[a-z0-9-]{1,63}`) to target                                                                                                                               |
+| `bucket`                       | one of `bucket` / `output_dir` | Cloud Storage bucket                                                                                                                                                             |
+| `prefix`                       | no                             | Object name prefix (default: the target name). 1–200 characters of `[A-Za-z0-9._/-]`, no leading or trailing `/`, no `//`, no `.` or `..` segment. Objects are `<prefix>/<name>` |
+| `output_dir`                   | one of `bucket` / `output_dir` | Local directory for the encrypted files instead of a bucket                                                                                                                      |
+| `paths`                        | yes                            | Directories to archive (absolute)                                                                                                                                                |
+| `exclude`                      | no                             | Glob patterns (see archiving rules)                                                                                                                                              |
+| `recipient` / `recipient_file` | exactly one                    | Public key, inline or as a file                                                                                                                                                  |
+| `compress`                     | no                             | Default `true`                                                                                                                                                                   |
+| `chunk_size`                   | no                             | Default 1,048,576 (section 3 range)                                                                                                                                              |
 
 - `kurumi config check [--config <file>]` validates the file (types, required keys, exactly one of each pair, readable recipient, valid patterns, absolute paths) and touches nothing else. It exits `0` or `1` with every problem listed
 - Command-line flags do not override configuration values. One source of truth per target
@@ -291,4 +291,3 @@ All URLs use the fixed scheme and host shown; bucket and object names are insert
 - Against a real bucket with a dedicated objectCreator-only service account: `push` succeeds; the same credential is refused when trying to read, list, delete, and overwrite (checked manually and written in the README); the name-collision behaviour in section 6 is observed and handled
 - With the same configuration file and a separate objectViewer-only credential, `list` shows the object, `restore --verify-only` passes, and `restore | tar -x` restores the files
 - The test vectors decrypt with a non-Go HPKE implementation
-
