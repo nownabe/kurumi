@@ -1,0 +1,105 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  common-checks:
+    name: Common Checks
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: nownabe/workflows/.github/workflows/pr.yaml@61479ab352f44180bef4dd8a4d9c19eb68dccb1a # v2.0.4
+
+  # Add your own jobs below. Use dorny/paths-filter to run a job only when
+  # relevant files changed, then list the job name in the result job's needs.
+  #
+  # filter:
+  #   name: Filter
+  #   runs-on: ubuntu-slim
+  #   timeout-minutes: 5
+  #   permissions:
+  #     contents: read
+  #     pull-requests: read
+  #   outputs:
+  #     changes: ${{ toJSON(steps.filter.outputs) }}
+  #   steps:
+  #     - id: filter
+  #       uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+  #       with:
+  #         filters: |
+  #           go:
+  #             - '**/*.go'
+  #             - 'go.mod'
+  #             - 'go.sum'
+  #           web:
+  #             - 'web/**'
+  #
+  # Example: run Go tests when Go files changed.
+  #
+  # check-go:
+  #   name: Check Go
+  #   needs: filter
+  #   if: ${{ fromJSON(needs.filter.outputs.changes).go == 'true' }}
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 10
+  #   permissions:
+  #     contents: read
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+  #       with:
+  #         persist-credentials: false
+  #     - name: Set up Go
+  #       uses: jdx/mise-action@5cb1df66ed5e1fb3c670ea0b62fd17a76979826a # v3.4.0
+  #       with:
+  #         install_args: go
+  #     - name: Run tests
+  #       run: go test ./...
+  #
+  # Example: run frontend checks (lint, typecheck, etc.) when web files changed.
+  #
+  # check-web:
+  #   name: Check Web
+  #   needs: filter
+  #   if: ${{ fromJSON(needs.filter.outputs.changes).web == 'true' }}
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 10
+  #   permissions:
+  #     contents: read
+  #   defaults:
+  #     run:
+  #       working-directory: web
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+  #       with:
+  #         persist-credentials: false
+  #     - name: Set up Bun
+  #       uses: jdx/mise-action@5cb1df66ed5e1fb3c670ea0b62fd17a76979826a # v3.4.0
+  #       with:
+  #         install_args: bun
+  #     - name: Install dependencies
+  #       run: bun install --frozen-lockfile
+  #     - name: Run checks
+  #       run: bun run check
+
+  result:
+    name: Pull Request Checks
+    if: always()
+    needs:
+      - common-checks
+      # - filter
+      # - check-go
+      # - check-web
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          HAS_FAILURE: ${{ contains(needs.*.result, 'failure') }}
+          HAS_CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
+        run: '[[ "$HAS_FAILURE" == "false" && "$HAS_CANCELLED" == "false" ]]'

@@ -1,0 +1,25 @@
+[tools]
+"aqua:rhysd/actionlint" = "1.7.12"
+"aqua:suzuki-shunsuke/ghalint" = "1.5.6"
+"aqua:zizmorcore/zizmor" = "1.31.1"
+"aqua:betterleaks/betterleaks" = "1.9.0"
+"aqua:trufflesecurity/trufflehog" = "3.99.4"
+"aqua:jqlang/jq" = "1.8.2"
+"npm:oxfmt" = "0.74.0"
+
+[settings]
+lockfile = true
+locked = true
+minimum_release_age = "3d"
+
+[tasks.setup]
+description = "Initialize the repository"
+run = [
+  "mise install",
+  # Not `mise generate --write`: it follows core.hooksPath and overwrites the user's global hook.
+  'hook="$(git rev-parse --git-common-dir)/hooks/pre-commit" && mise generate git-pre-commit --task pre-commit >"$hook" && chmod +x "$hook"',
+]
+
+[tasks.pre-commit]
+description = "Scan staged changes for secrets with betterleaks"
+run = "betterleaks git --staged --no-banner --redact"
