@@ -336,6 +336,30 @@ func TestTarTrailer(t *testing.T) {
 	}
 }
 
+// TestLateAuthentication: the tar stream is complete before a damaged or
+// missing final record, which must still fail verify and decrypt.
+func TestLateAuthentication(t *testing.T) {
+	k := testKey(t)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "id")
+	os.WriteFile(keyFile, []byte(encodeKey(privateKeyPrefix, k.Bytes())), 0o600)
+	plain := append(makeTar(t, entry{"d/x", randomBytes(minChunkSize-512-1024, 8)}), make([]byte, 100)...)
+	file := encryptRaw(t, k.PublicKey(), false, minChunkSize, plain)
+	hdr, recs := records(t, file)
+	damaged := bytes.Clone(file)
+	damaged[len(damaged)-1] ^= 1
+	for name, bad := range map[string][]byte{"damaged final": damaged, "missing final": append(hdr, recs[0]...)} {
+		p := filepath.Join(dir, "bad")
+		os.WriteFile(p, bad, 0o600)
+		for _, cmd := range []string{"verify", "decrypt"} {
+			var stdout, stderr bytes.Buffer
+			if code := run(t.Context(), []string{cmd, "--identity", keyFile, p}, nil, &stdout, &stderr); code != exitFailure {
+				t.Errorf("%s %s: exit %d", name, cmd, code)
+			}
+		}
+	}
+}
+
 func TestKeyParsing(t *testing.T) {
 	k := testKey(t)
 	line := encodeKey(privateKeyPrefix, k.Bytes())
