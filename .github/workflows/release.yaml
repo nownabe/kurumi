@@ -1,0 +1,44 @@
+name: Release
+
+# On every push to main, release-please keeps a release PR up to date. Merging
+# it creates the v* tag and a draft GitHub Release; the tag push then runs
+# publish.yaml, which attaches the artifacts to that draft and publishes it.
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    # The GitHub App credentials are stored as secrets on the "release"
+    # environment so they're only readable from this workflow.
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # A GitHub App token is used instead of GITHUB_TOKEN because events
+      # created with GITHUB_TOKEN don't trigger workflows: the release PR must
+      # run the pull_request checks and the tag must run publish.yaml.
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID_RELEASE_PLEASE }}
+          private-key: ${{ secrets.GH_APP_PKEY_RELEASE_PLEASE }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Run release-please
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

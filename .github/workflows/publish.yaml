@@ -1,0 +1,108 @@
+name: Publish
+
+# Builds the artifacts for a v* tag created by release-please, uploads them to
+# the draft GitHub Release, and publishes it. The Release starts as a draft so
+# that every artifact is attached before it becomes public, which also keeps
+# this flow working when releases are immutable.
+on:
+  push:
+    tags:
+      - v*
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Tests run code from this repository, so they get no write access to the
+  # Release or to the files that are released.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up tools
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: go
+          cache: false
+      - name: Test
+        run: go vet ./... && go test ./...
+
+  goreleaser:
+    name: GoReleaser
+    needs: test
+    environment: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Find the draft release, upload assets to it, and publish it.
+      contents: write
+    outputs:
+      checksums: ${{ steps.checksums.outputs.checksums }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up tools
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: go aqua:goreleaser/goreleaser
+          # A poisoned cache could taint the released binaries.
+          cache: false
+      # release-please pushes the tag before it creates the draft. Without the
+      # draft, GoReleaser would create a separate release instead.
+      - name: Wait for the draft release
+        run: |
+          for _ in $(seq 30); do
+            if gh api "repos/$GITHUB_REPOSITORY/releases" | jq -e --arg name "$GITHUB_REF_NAME" 'any(.[]; .draft and .name == $name)' >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::No draft release named $GITHUB_REF_NAME"
+          exit 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Release
+        run: goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Output checksums
+        id: checksums
+        run: |
+          {
+            echo 'checksums<<EOF'
+            cat dist/SHA256SUMS
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+  # Signs in its own job: with id-token: write, every step of a job could get a
+  # signing certificate for this workflow, including the tests and build tools.
+  attest:
+    name: Attest
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Write checksums
+        run: printf '%s\n' "$CHECKSUMS" > SHA256SUMS
+        env:
+          CHECKSUMS: ${{ needs.goreleaser.outputs.checksums }}
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: SHA256SUMS

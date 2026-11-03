@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: kurumi
+
+builds:
+  - binary: "{{ .Os }}_{{ .Arch }}/kurumi"
+    no_unique_dist_dir: true
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{ .Version }} -X main.commit={{ .FullCommit }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - darwin_arm64
+      - windows_amd64
+
+archives:
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: SHA256SUMS
+
+# release-please writes the release notes.
+changelog:
+  disable: true
+
+release:
+  use_existing_draft: true
+  mode: keep-existing
