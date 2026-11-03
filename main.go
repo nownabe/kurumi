@@ -29,6 +29,7 @@ const usage = `usage:
   kurumi public-key --identity <file|->
   kurumi decrypt --identity <file|-> [<file>]
   kurumi verify --identity <file|-> [<file>]
+  kurumi config check [--config <file>]
   kurumi --version
 `
 
@@ -55,6 +56,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	cmds := map[string]func([]string) int{
 		"keygen": c.keygen, "public-key": c.publicKey, "decrypt": c.decrypt, "verify": c.verify,
+		"config": c.config,
 	}
 	if args[0] == "--version" || args[0] == "-version" {
 		fmt.Fprintf(stdout, "kurumi %s (commit %s)\n", version, commit)
@@ -146,6 +148,27 @@ func (c *cli) publicKey(args []string) int {
 		return c.fail(err)
 	}
 	fmt.Fprintln(c.stdout, encodeKey(publicKeyPrefix, k.PublicKey().Bytes()))
+	return exitOK
+}
+
+func (c *cli) config(args []string) int {
+	if len(args) == 0 || args[0] != "check" {
+		fmt.Fprint(c.stderr, usage)
+		return exitFailure
+	}
+	fs := flag.NewFlagSet("config check", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "configuration file")
+	if _, ok := c.parse(fs, args[1:], 0, 0); !ok {
+		return exitFailure
+	}
+	_, errs := loadConfig(*cfgPath)
+	for _, e := range errs {
+		c.log.Error(e.Error())
+	}
+	if errs != nil {
+		return exitFailure
+	}
+	fmt.Fprintln(c.stderr, "configuration OK")
 	return exitOK
 }
 
