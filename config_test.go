@@ -130,4 +130,9 @@ func TestConfigCheckCommand(t *testing.T) {
 			t.Errorf("stderr lacks %q: %s", want, &stderr)
 		}
 	}
+	for _, cmd := range [][]string{{"push", "app"}, {"list", "app"}} {
+		if code := run(t.Context(), append(cmd, "--config", p), nil, &stdout, &stderr); code != exitFailure {
+			t.Errorf("%v: exit %d", cmd, code)
+		}
+	}
 }

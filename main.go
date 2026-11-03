@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,12 +13,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
+	"strings"
+	"time"
 )
 
 const (
 	exitOK = iota
 	exitFailure
+	exitUnknown
+	exitNoSuccessLine
 )
 
 // Set at release build time with -ldflags "-X main.version=... -X main.commit=...".
@@ -27,6 +37,9 @@ var (
 const usage = `usage:
   kurumi keygen [-o <private-key-file>]
   kurumi public-key --identity <file|->
+  kurumi push [--config <file>] [--dry-run] <target>
+  kurumi list [--config <file>] [--format text|json] <target>
+  kurumi restore [--config <file>] --identity <file|-> [--verify-only] <target> [<name>]
   kurumi decrypt --identity <file|-> [<file>]
   kurumi verify --identity <file|-> [<file>]
   kurumi config check [--config <file>]
@@ -55,8 +68,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return exitFailure
 	}
 	cmds := map[string]func([]string) int{
-		"keygen": c.keygen, "public-key": c.publicKey, "decrypt": c.decrypt, "verify": c.verify,
-		"config": c.config,
+		"keygen": c.keygen, "public-key": c.publicKey, "push": c.push, "list": c.list,
+		"restore": c.restore, "decrypt": c.decrypt, "verify": c.verify, "config": c.config,
 	}
 	if args[0] == "--version" || args[0] == "-version" {
 		fmt.Fprintf(stdout, "kurumi %s (commit %s)\n", version, commit)
@@ -170,6 +183,293 @@ func (c *cli) config(args []string) int {
 	}
 	fmt.Fprintln(c.stderr, "configuration OK")
 	return exitOK
+}
+
+func (c *cli) target(cfgPath, name string) (*Target, error) {
+	cfg, errs := loadConfig(cfgPath)
+	if errs != nil {
+		return nil, errors.Join(errs...)
+	}
+	t, ok := cfg.Targets[name]
+	if !ok {
+		return nil, fmt.Errorf("no target %q in the configuration", name)
+	}
+	return t, nil
+}
+
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
+
+var backupNameRE = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.kurumi$`)
+
+const nameTimeLayout = "20060102T150405Z"
+
+func newBackupName() string {
+	var b [4]byte
+	rand.Read(b[:])
+	return time.Now().UTC().Format(nameTimeLayout) + "-" + hex.EncodeToString(b[:]) + ".kurumi"
+}
+
+func validBackupName(s string) bool {
+	if !backupNameRE.MatchString(s) {
+		return false
+	}
+	_, err := time.Parse(nameTimeLayout, s[:16])
+	return err == nil
+}
+
+func (c *cli) push(args []string) int {
+	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "configuration file")
+	dryRun := fs.Bool("dry-run", false, "encrypt into nowhere and report the size")
+	pos, ok := c.parse(fs, args, 1, 1)
+	if !ok {
+		return exitFailure
+	}
+	t, err := c.target(*cfgPath, pos[0])
+	if err != nil {
+		return c.fail(err)
+	}
+	started := time.Now().UTC()
+	c.log.Info("push started", "target", t.name, "dry_run", *dryRun)
+
+	var sink io.Writer = io.Discard
+	var skip []os.FileInfo
+	finalize := func() (string, error) { return "", nil }
+	switch {
+	case *dryRun:
+	case t.OutputDir != "":
+		tmp, err := os.CreateTemp(t.OutputDir, ".kurumi-*.tmp")
+		if err != nil {
+			return c.fail(err)
+		}
+		defer os.Remove(tmp.Name())
+		defer tmp.Close()
+		fi, err := tmp.Stat()
+		if err != nil {
+			return c.fail(err)
+		}
+		sink, skip = tmp, []os.FileInfo{fi}
+		finalize = func() (string, error) { return publishLocal(tmp, t.OutputDir, newBackupName) }
+	default:
+		return c.fail(errors.New("Cloud Storage targets are not supported yet"))
+	}
+
+	cw := &countWriter{w: sink}
+	ew, err := newEncryptWriter(cw, t.recipient, t.compress(), t.chunkSize())
+	if err != nil {
+		return c.fail(err)
+	}
+	files, err := writeArchive(ew, t.Paths, t.Exclude, skip)
+	if err == nil {
+		err = ew.Close()
+	}
+	if err != nil {
+		return c.fail(fmt.Errorf("nothing was finalized: %w", err))
+	}
+	object, err := finalize()
+	if err != nil {
+		return c.fail(fmt.Errorf("nothing was finalized: %w", err))
+	}
+	if !*dryRun {
+		c.log.Info("backup finalized", "target", t.name, "object", object, "bytes", cw.n, "files", files)
+	}
+	line, _ := json.Marshal(struct {
+		Target     string `json:"target"`
+		Object     string `json:"object"`
+		DryRun     bool   `json:"dry_run"`
+		Bytes      int64  `json:"bytes"`
+		Files      int64  `json:"files"`
+		StartedAt  string `json:"started_at"`
+		FinishedAt string `json:"finished_at"`
+	}{t.name, object, *dryRun, cw.n, files, started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)})
+	if _, err := c.stdout.Write(append(line, '\n')); err != nil {
+		c.log.Error("backup finalized but the success line could not be written", "object", object, "error", err)
+		return exitNoSuccessLine
+	}
+	return exitOK
+}
+
+// publishLocal links the finished temporary file under a fresh backup name;
+// os.Link fails rather than replace an existing file.
+func publishLocal(tmp *os.File, dir string, newName func() string) (string, error) {
+	if err := tmp.Sync(); err != nil {
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	for attempt := 0; ; attempt++ {
+		final := filepath.Join(dir, newName())
+		err := os.Link(tmp.Name(), final)
+		if errors.Is(err, os.ErrExist) && attempt < 3 {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return final, os.Remove(tmp.Name())
+	}
+}
+
+type backup struct {
+	name    string
+	size    int64
+	created time.Time
+}
+
+func (c *cli) backups(t *Target) ([]backup, error) {
+	if t.Bucket != "" {
+		return nil, errors.New("Cloud Storage targets are not supported yet")
+	}
+	entries, err := os.ReadDir(t.OutputDir)
+	if err != nil {
+		return nil, err
+	}
+	var bs []backup
+	for _, e := range entries {
+		if !validBackupName(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return nil, err
+		}
+		bs = append(bs, backup{name: e.Name(), size: info.Size(), created: info.ModTime()})
+	}
+	if len(bs) == 0 {
+		return nil, fmt.Errorf("no backups found for target %q", t.name)
+	}
+	slices.SortFunc(bs, func(a, b backup) int { return strings.Compare(a.name, b.name) })
+	return bs, nil
+}
+
+func (c *cli) list(args []string) int {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "configuration file")
+	format := fs.String("format", "text", "text or json")
+	pos, ok := c.parse(fs, args, 1, 1)
+	if !ok {
+		return exitFailure
+	}
+	if *format != "text" && *format != "json" {
+		return c.fail(errors.New("--format must be text or json"))
+	}
+	t, err := c.target(*cfgPath, pos[0])
+	if err != nil {
+		return c.fail(err)
+	}
+	bs, err := c.backups(t)
+	if err != nil {
+		return c.fail(err)
+	}
+	for _, b := range bs {
+		created := b.created.UTC().Format(time.RFC3339)
+		if *format == "json" {
+			line, _ := json.Marshal(map[string]any{"name": b.name, "size": b.size, "created": created})
+			fmt.Fprintf(c.stdout, "%s\n", line)
+		} else {
+			fmt.Fprintf(c.stdout, "%s\t%d\t%s\n", b.name, b.size, created)
+		}
+	}
+	return exitOK
+}
+
+func (c *cli) restore(args []string) int {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "configuration file")
+	id := fs.String("identity", "", "private key file, or - for standard input")
+	verifyOnly := fs.Bool("verify-only", false, "download and verify, write no archive")
+	pos, ok := c.parse(fs, args, 1, 2)
+	if !ok {
+		return exitFailure
+	}
+	priv, err := readIdentity(*id, c.stdin)
+	if err != nil {
+		return c.fail(err)
+	}
+	if len(pos) == 2 && !validBackupName(pos[1]) {
+		return c.fail(fmt.Errorf("%q is not a backup name (expected e.g. 20260101T000000Z-0123abcd.kurumi)", pos[1]))
+	}
+	t, err := c.target(*cfgPath, pos[0])
+	if err != nil {
+		return c.fail(err)
+	}
+	bs, err := c.backups(t)
+	if err != nil {
+		return c.fail(err)
+	}
+	b := bs[len(bs)-1]
+	if len(pos) == 2 {
+		i := slices.IndexFunc(bs, func(b backup) bool { return b.name == pos[1] })
+		if i < 0 {
+			return c.fail(fmt.Errorf("backup %s not found in target %q", pos[1], t.name))
+		}
+		b = bs[i]
+	}
+	c.log.Info("restoring", "target", t.name, "name", b.name)
+
+	tmp, err := os.CreateTemp("", "kurumi-restore-*")
+	if err != nil {
+		return c.fail(err)
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if err := copyLocal(filepath.Join(t.OutputDir, b.name), tmp); err != nil {
+		return c.fail(err)
+	}
+	rep, err := decryptFile(io.Discard, tmp, priv)
+	if err != nil {
+		return c.fail(fmt.Errorf("verify failed, nothing written: %w", err))
+	}
+	if *verifyOnly {
+		return c.report(rep)
+	}
+	if _, err := decryptFile(c.stdout, tmp, priv); err != nil {
+		return c.fail(err)
+	}
+	return exitOK
+}
+
+func decryptFile(out io.Writer, f *os.File, priv *ecdh.PrivateKey) (archiveReport, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return archiveReport{}, err
+	}
+	return decryptTo(out, f, priv)
+}
+
+// copyLocal copies a backup that must be a regular file, so the bytes cannot
+// change between verifying and decrypting.
+func copyLocal(path string, dst io.Writer) error {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	after, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(before, after) {
+		return fmt.Errorf("%s changed while being opened", path)
+	}
+	_, err = io.Copy(dst, f)
+	return err
 }
 
 func (c *cli) report(rep archiveReport) int {
