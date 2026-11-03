@@ -2,12 +2,12 @@
 go = "1.27.3"
 "aqua:goreleaser/goreleaser" = "2.19.0"
 "aqua:rhysd/actionlint" = "1.7.12"
-"aqua:suzuki-shunsuke/ghalint" = "1.5.6"
+"aqua:suzuki-shunsuke/ghalint" = "1.6.0"
 "aqua:zizmorcore/zizmor" = "1.31.1"
 "aqua:betterleaks/betterleaks" = "1.9.0"
-"aqua:trufflesecurity/trufflehog" = "3.99.4"
+"aqua:trufflesecurity/trufflehog" = "3.99.7"
 "aqua:jqlang/jq" = "1.8.2"
-"npm:oxfmt" = "0.74.0"
+"npm:oxfmt" = "0.75.0"
 
 [settings]
 lockfile = true
