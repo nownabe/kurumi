@@ -92,6 +92,14 @@ func readIdentity(path string, stdin io.Reader) (*ecdh.PrivateKey, error) {
 	return k, nil
 }
 
+func readRecipientFile(path string) (*ecdh.PublicKey, error) {
+	b, err := readSmallFile(path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parsePublicKey(b)
+}
+
 func generateKey() (*ecdh.PrivateKey, error) { return ecdh.X25519().GenerateKey(rand.Reader) }
 
 // isTerminal treats any character device except the null device as a terminal;
