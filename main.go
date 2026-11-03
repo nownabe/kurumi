@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,12 +35,21 @@ var (
 	commit  = "unknown"
 )
 
+// transport is replaced by tests to reach a fake server under the real URLs.
+var transport http.RoundTripper = http.DefaultTransport
+
+// Tests shrink these to exercise chunking and retries quickly.
+var (
+	uploadBufSize = defaultUploadBuf
+	retryBackoff  = time.Second
+)
+
 const usage = `usage:
   kurumi keygen [-o <private-key-file>]
   kurumi public-key --identity <file|->
-  kurumi push [--config <file>] [--dry-run] <target>
-  kurumi list [--config <file>] [--format text|json] <target>
-  kurumi restore [--config <file>] --identity <file|-> [--verify-only] <target> [<name>]
+  kurumi push [--config <file>] [--credentials <file>] [--dry-run] <target>
+  kurumi list [--config <file>] [--credentials <file>] [--format text|json] <target>
+  kurumi restore [--config <file>] [--credentials <file>] --identity <file|-> [--verify-only] <target> [<name>]
   kurumi decrypt --identity <file|-> [<file>]
   kurumi verify --identity <file|-> [<file>]
   kurumi config check [--config <file>]
@@ -229,6 +239,7 @@ func validBackupName(s string) bool {
 func (c *cli) push(args []string) int {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "configuration file")
+	creds := fs.String("credentials", "", "service account key file (upload-only)")
 	dryRun := fs.Bool("dry-run", false, "encrypt into nowhere and report the size")
 	pos, ok := c.parse(fs, args, 1, 1)
 	if !ok {
@@ -260,7 +271,18 @@ func (c *cli) push(args []string) int {
 		sink, skip = tmp, []os.FileInfo{fi}
 		finalize = func() (string, error) { return publishLocal(tmp, t.OutputDir, newBackupName) }
 	default:
-		return c.fail(errors.New("Cloud Storage targets are not supported yet"))
+		gc, err := newGCSClient(*creds, scopeWrite, transport, c.log)
+		if err != nil {
+			return c.fail(err)
+		}
+		object, session, err := gc.startUpload(c.ctx, t.Bucket, func() string { return t.Prefix + "/" + newBackupName() })
+		if err != nil {
+			return c.fail(err)
+		}
+		c.log.Info("upload session started", "bucket", t.Bucket, "object", object)
+		up := &uploader{c: gc, ctx: c.ctx, session: session, bufSize: uploadBufSize}
+		sink = up
+		finalize = func() (string, error) { return object, up.finish() }
 	}
 
 	cw := &countWriter{w: sink}
@@ -276,6 +298,10 @@ func (c *cli) push(args []string) int {
 		return c.fail(fmt.Errorf("nothing was finalized: %w", err))
 	}
 	object, err := finalize()
+	if errors.Is(err, errOutcomeUnknown) {
+		c.log.Error(err.Error(), "object", object)
+		return exitUnknown
+	}
 	if err != nil {
 		return c.fail(fmt.Errorf("nothing was finalized: %w", err))
 	}
@@ -324,26 +350,42 @@ type backup struct {
 	name    string
 	size    int64
 	created time.Time
+	obj     objectInfo
 }
 
-func (c *cli) backups(t *Target) ([]backup, error) {
-	if t.Bucket != "" {
-		return nil, errors.New("Cloud Storage targets are not supported yet")
-	}
-	entries, err := os.ReadDir(t.OutputDir)
-	if err != nil {
-		return nil, err
-	}
+func (c *cli) backups(t *Target, gc *gcsClient) ([]backup, error) {
 	var bs []backup
-	for _, e := range entries {
-		if !validBackupName(e.Name()) {
-			continue
-		}
-		info, err := e.Info()
+	if t.Bucket != "" {
+		objs, err := gc.listObjects(c.ctx, t.Bucket, t.Prefix)
 		if err != nil {
 			return nil, err
 		}
-		bs = append(bs, backup{name: e.Name(), size: info.Size(), created: info.ModTime()})
+		for _, o := range objs {
+			name, ok := strings.CutPrefix(o.Name, t.Prefix+"/")
+			if !ok || !validBackupName(name) {
+				continue
+			}
+			var b backup
+			b.name, b.obj = name, o
+			fmt.Sscan(o.Size, &b.size)
+			b.created, _ = time.Parse(time.RFC3339, o.TimeCreated)
+			bs = append(bs, b)
+		}
+	} else {
+		entries, err := os.ReadDir(t.OutputDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if !validBackupName(e.Name()) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				return nil, err
+			}
+			bs = append(bs, backup{name: e.Name(), size: info.Size(), created: info.ModTime()})
+		}
 	}
 	if len(bs) == 0 {
 		return nil, fmt.Errorf("no backups found for target %q", t.name)
@@ -352,9 +394,17 @@ func (c *cli) backups(t *Target) ([]backup, error) {
 	return bs, nil
 }
 
+func (c *cli) readClient(t *Target, creds string) (*gcsClient, error) {
+	if t.Bucket == "" {
+		return nil, nil
+	}
+	return newGCSClient(creds, scopeRead, transport, c.log)
+}
+
 func (c *cli) list(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "configuration file")
+	creds := fs.String("credentials", "", "service account key file (read-only)")
 	format := fs.String("format", "text", "text or json")
 	pos, ok := c.parse(fs, args, 1, 1)
 	if !ok {
@@ -367,7 +417,11 @@ func (c *cli) list(args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	bs, err := c.backups(t)
+	gc, err := c.readClient(t, *creds)
+	if err != nil {
+		return c.fail(err)
+	}
+	bs, err := c.backups(t, gc)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -386,6 +440,7 @@ func (c *cli) list(args []string) int {
 func (c *cli) restore(args []string) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "configuration file")
+	creds := fs.String("credentials", "", "service account key file (read-only)")
 	id := fs.String("identity", "", "private key file, or - for standard input")
 	verifyOnly := fs.Bool("verify-only", false, "download and verify, write no archive")
 	pos, ok := c.parse(fs, args, 1, 2)
@@ -403,7 +458,11 @@ func (c *cli) restore(args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	bs, err := c.backups(t)
+	gc, err := c.readClient(t, *creds)
+	if err != nil {
+		return c.fail(err)
+	}
+	bs, err := c.backups(t, gc)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -423,7 +482,12 @@ func (c *cli) restore(args []string) int {
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	if err := copyLocal(filepath.Join(t.OutputDir, b.name), tmp); err != nil {
+	if gc != nil {
+		err = gc.download(c.ctx, t.Bucket, b.obj, tmp)
+	} else {
+		err = copyLocal(filepath.Join(t.OutputDir, b.name), tmp)
+	}
+	if err != nil {
 		return c.fail(err)
 	}
 	rep, err := decryptFile(io.Discard, tmp, priv)
