@@ -7,11 +7,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 )
 
 const (
 	privateKeyPrefix = "kurumi-private-key-v1:"
 	publicKeyPrefix  = "kurumi-public-key-v1:"
+	maxKeyFileSize   = 4096
 )
 
 func encodeKey(prefix string, key []byte) string {
@@ -52,4 +55,52 @@ func parsePrivateKey(line []byte) (*ecdh.PrivateKey, error) {
 	return ecdh.X25519().NewPrivateKey(b)
 }
 
+func readSmallFile(path string, stdin io.Reader) ([]byte, error) {
+	r := stdin
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		r = f
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxKeyFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxKeyFileSize {
+		clear(b)
+		return nil, fmt.Errorf("%s: larger than %d bytes", path, maxKeyFileSize)
+	}
+	return b, nil
+}
+
+func readIdentity(path string, stdin io.Reader) (*ecdh.PrivateKey, error) {
+	if path == "" {
+		return nil, errors.New("--identity is required")
+	}
+	b, err := readSmallFile(path, stdin)
+	if err != nil {
+		return nil, fmt.Errorf("reading identity: %w", err)
+	}
+	defer clear(b)
+	k, err := parsePrivateKey(b)
+	if err != nil {
+		return nil, fmt.Errorf("identity: %w", err)
+	}
+	return k, nil
+}
+
 func generateKey() (*ecdh.PrivateKey, error) { return ecdh.X25519().GenerateKey(rand.Reader) }
+
+// isTerminal treats any character device except the null device as a terminal;
+// the standard library has no portable isatty.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	return err != nil || !os.SameFile(fi, null)
+}
