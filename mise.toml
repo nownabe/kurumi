@@ -7,7 +7,7 @@ go = "1.27.4"
 "aqua:betterleaks/betterleaks" = "1.10.1"
 "aqua:trufflesecurity/trufflehog" = "3.99.9"
 "aqua:jqlang/jq" = "1.8.2"
-"npm:oxfmt" = "0.78.0"
+"npm:oxfmt" = "0.79.0"
 
 [settings]
 lockfile = true
